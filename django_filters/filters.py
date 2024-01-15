@@ -68,8 +68,7 @@ class Filter:
     field_class = forms.Field
 
     def __init__(
-        self, field_name=None, lookup_expr=None, *, label=None, method=None, distinct=False, exclude=False,
-        aggregated=False, **kwargs
+        self, field_name=None, lookup_expr=None, *, label=None, method=None, distinct=False, exclude=False, **kwargs
     ):
         if lookup_expr is None:
             lookup_expr = settings.DEFAULT_LOOKUP_EXPR
@@ -79,7 +78,6 @@ class Filter:
         self.method = method
         self.distinct = distinct
         self.exclude = exclude
-        self.aggregated = aggregated
 
         self.extra = kwargs
         self.extra.setdefault('required', False)
@@ -792,7 +790,7 @@ class FilterMethod:
 
     def __call__(self, qs, value):
         if value in EMPTY_VALUES:
-            return Q() if self.f.aggregated else qs
+            return Q() if self.f.parent.aggregated_filter else qs
 
         return self.method(qs, self.f.field_name, value)
 
