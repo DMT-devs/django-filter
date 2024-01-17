@@ -223,6 +223,9 @@ class BaseFilterSet:
         """
         return self.form.errors
 
+    def is_custom_filter_field(self, filter_field):
+        return filter_field.field_name not in self.Meta.fields
+
     def filter_queryset(self, queryset):
         """
         Filter the queryset with the underlying form's `cleaned_data`. You must
@@ -231,27 +234,24 @@ class BaseFilterSet:
         This method should be overridden if additional filtering needs to be
         applied to the queryset before it is cached.
         """
-        if self.aggregated_filter:
-            filter_q = models.Q()
-            exclude_q = models.Q()
-            distinct = False
-            for name, value in self.form.cleaned_data.items():
-                filter_field = self.filters[name]
+        filter_q = models.Q()
+        exclude_q = models.Q()
+        distinct = False
+        for name, value in self.form.cleaned_data.items():
+            filter_field = self.filters[name]
+            if self.aggregated_filter and not self.is_custom_filter_field(filter_field):
                 q_object = filter_field.get_q_object(queryset, value)
                 assert isinstance(q_object, models.Q), \
                     "Expected '%s.%s' to return a Q object, but got a %s instead." \
                     % (type(self).__name__, name, type(q_object).__name__)
                 (filter_q, exclude_q, distinct) = filter_field.update_qs_params(q_object, filter_q, exclude_q, distinct)
-
-            final_queryset = queryset.exclude(exclude_q).filter(filter_q)
-            return final_queryset.distinct() if distinct else final_queryset
-        else:
-            for name, value in self.form.cleaned_data.items():
-                queryset = self.filters[name].filter(queryset, value)
+            else:
+                queryset = filter_field.filter(queryset, value)
                 assert isinstance(queryset, models.QuerySet), \
                     "Expected '%s.%s' to return a QuerySet, but got a %s instead." \
                     % (type(self).__name__, name, type(queryset).__name__)
-            return queryset
+        final_queryset = queryset.exclude(exclude_q).filter(filter_q)
+        return final_queryset.distinct() if distinct else final_queryset
 
     @property
     def qs(self):
