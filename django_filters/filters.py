@@ -790,7 +790,7 @@ class FilterMethod:
 
     def __call__(self, qs, value):
         if value in EMPTY_VALUES:
-            return Q() if self.f.parent.aggregated_filter else qs
+            return Q() if self.f.parent.aggregated_filter and not self.f.parent.is_custom_filter_field(self.f) else qs
 
         return self.method(qs, self.f.field_name, value)
 
