@@ -224,7 +224,7 @@ class BaseFilterSet:
         return self.form.errors
 
     def is_custom_filter_field(self, filter_field):
-        return filter_field.field_name not in self.Meta.fields
+        return filter_field.field_name in [field.field_name for field in self.declared_filters.values()]
 
     def filter_queryset(self, queryset):
         """
