@@ -178,6 +178,12 @@ class ChoiceFilter(Filter):
         self.null_value = kwargs.get('null_value', settings.NULL_CHOICE_VALUE)
         super().__init__(*args, **kwargs)
 
+    def get_q_object(self, qs, value):
+        if value != self.null_value:
+            return super().get_q_object(qs, value)
+        lookup = "%s__%s" % (self.field_name, self.lookup_expr)
+        return Q(**{lookup: None})
+
     def filter(self, qs, value):
         if value != self.null_value:
             return super().filter(qs, value)
@@ -240,6 +246,9 @@ class MultipleChoiceFilter(Filter):
             return True
 
         return False
+
+    def get_q_object(self, qs, value):
+        return super().get_q_object(qs, value) if value else Q()
 
     def filter(self, qs, value):
         if not value:
@@ -395,6 +404,21 @@ class NumberFilter(Filter):
 class NumericRangeFilter(Filter):
     field_class = RangeField
 
+    def get_q_object(self, qs, value):
+        if value in EMPTY_VALUES:
+            return Q()
+        if value.start is not None and value.stop is not None:
+            value = (value.start, value.stop)
+        elif value.start is not None:
+            self.lookup_expr = "startswith"
+            value = value.start
+        elif value.stop is not None:
+            self.lookup_expr = "endswith"
+            value = value.stop
+
+        lookup = "%s__%s" % (self.field_name, self.lookup_expr)
+        return Q(**{lookup: value})
+
     def filter(self, qs, value):
         if value:
             if value.start is not None and value.stop is not None:
@@ -411,6 +435,23 @@ class NumericRangeFilter(Filter):
 
 class RangeFilter(Filter):
     field_class = RangeField
+
+    def get_q_object(self, qs, value):
+        if value in EMPTY_VALUES:
+            return Q()
+
+        if value.start is not None and value.stop is not None:
+            self.lookup_expr = "range"
+            value = (value.start, value.stop)
+        elif value.start is not None:
+            self.lookup_expr = "gte"
+            value = value.start
+        elif value.stop is not None:
+            self.lookup_expr = "lte"
+            value = value.stop
+
+        lookup = "%s__%s" % (self.field_name, self.lookup_expr)
+        return Q(**{lookup: value})
 
     def filter(self, qs, value):
         if value:
@@ -464,6 +505,31 @@ class DateRangeFilter(ChoiceFilter):
         }),
     }
 
+    q_objects = {
+        "today": lambda name: Q(
+            **{"%s__year" % name: now().year, "%s__month" % name: now().month, "%s__day" % name: now().day}
+        ),
+        "yesterday": lambda name: Q(
+            **{
+                "%s__year" % name: (now() - timedelta(days=1)).year,
+                "%s__month" % name: (now() - timedelta(days=1)).month,
+                "%s__day" % name: (now() - timedelta(days=1)).day,
+            }
+        ),
+        "week": lambda name: Q(
+            **{
+                "%s__gte" % name: _truncate(now() - timedelta(days=7)),
+                "%s__lt" % name: _truncate(now() + timedelta(days=1)),
+            }
+        ),
+        "month": lambda name: Q(**{"%s__year" % name: now().year, "%s__month" % name: now().month}),
+        "year": lambda name: Q(
+            **{
+                "%s__year" % name: now().year,
+            }
+        ),
+    }
+
     def __init__(self, choices=None, filters=None, *args, **kwargs):
         if choices is not None:
             self.choices = choices
@@ -483,6 +549,12 @@ class DateRangeFilter(ChoiceFilter):
         # null choice not relevant
         kwargs.setdefault('null_label', None)
         super().__init__(choices=self.choices, *args, **kwargs)
+
+    def get_q_object(self, qs, value):
+        if not value:
+            return Q()
+        assert value in self.filters
+        return self.q_objects[value](self.field_name)
 
     def filter(self, qs, value):
         if not value:
@@ -673,6 +745,12 @@ class LookupChoiceFilter(Filter):
             )
 
         return self._field
+
+    def get_q_object(self, qs, value):
+        if not lookup:
+            return Q()
+        self.lookup_expr = lookup.lookup_expr
+        return super().get_q_object(qs, value)
 
     def filter(self, qs, lookup):
         if not lookup:
