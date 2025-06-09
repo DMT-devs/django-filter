@@ -190,7 +190,7 @@ FILTER_FOR_DBFIELD_DEFAULTS = {
 class BaseFilterSet:
     FILTER_DEFAULTS = FILTER_FOR_DBFIELD_DEFAULTS
 
-    def __init__(self, data=None, queryset=None, *, request=None, prefix=None):
+    def __init__(self, data=None, queryset=None, *, request=None, prefix=None, aggregated_filter=True):
         if queryset is None:
             queryset = self._meta.model._default_manager.all()
         model = queryset.model
@@ -200,8 +200,13 @@ class BaseFilterSet:
         self.queryset = queryset
         self.request = request
         self.form_prefix = prefix
+        self.aggregated_filter = aggregated_filter
+
+        if self.request and self.request.query_params.get('aggregated_filter') == 'false':
+            self.aggregated_filter = False
 
         self.filters = copy.deepcopy(self.base_filters)
+
 
         # propagate the model and filterset to the filters
         for filter_ in self.filters.values():
@@ -221,6 +226,9 @@ class BaseFilterSet:
         """
         return self.form.errors
 
+    def is_custom_filter_field(self, filter_field):
+        return filter_field.field_name in [field.field_name for field in self.declared_filters.values()]
+
     def filter_queryset(self, queryset):
         """
         Filter the queryset with the underlying form's `cleaned_data`. You must
@@ -229,16 +237,24 @@ class BaseFilterSet:
         This method should be overridden if additional filtering needs to be
         applied to the queryset before it is cached.
         """
+        filter_q = models.Q()
+        exclude_q = models.Q()
+        distinct = False
         for name, value in self.form.cleaned_data.items():
-            queryset = self.filters[name].filter(queryset, value)
-            assert isinstance(
-                queryset, models.QuerySet
-            ), "Expected '%s.%s' to return a QuerySet, but got a %s instead." % (
-                type(self).__name__,
-                name,
-                type(queryset).__name__,
-            )
-        return queryset
+            filter_field = self.filters[name]
+            if self.aggregated_filter and not self.is_custom_filter_field(filter_field):
+                q_object = filter_field.get_q_object(queryset, value)
+                assert isinstance(q_object, models.Q), \
+                    "Expected '%s.%s' to return a Q object, but got a %s instead." \
+                    % (type(self).__name__, name, type(q_object).__name__)
+                (filter_q, exclude_q, distinct) = filter_field.update_qs_params(q_object, filter_q, exclude_q, distinct)
+            else:
+                queryset = filter_field.filter(queryset, value)
+                assert isinstance(queryset, models.QuerySet), \
+                    "Expected '%s.%s' to return a QuerySet, but got a %s instead." \
+                    % (type(self).__name__, name, type(queryset).__name__)
+        final_queryset = queryset.exclude(exclude_q).filter(filter_q)
+        return final_queryset.distinct() if distinct else final_queryset
 
     @property
     def qs(self):
@@ -300,6 +316,7 @@ class BaseFilterSet:
 
         # Remove excluded fields
         exclude = exclude or []
+
         if not isinstance(fields, dict):
             fields = [
                 (f, [settings.DEFAULT_LOOKUP_EXPR]) for f in fields if f not in exclude
