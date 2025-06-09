@@ -1,8 +1,6 @@
 markdown
-coreapi
 django-crispy-forms
 
-coverage
-mock
+coverage[toml]
 pytz
 unittest-xml-reporting
