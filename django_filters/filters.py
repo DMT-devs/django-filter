@@ -85,6 +85,7 @@ class Filter:
         method=None,
         distinct=False,
         exclude=False,
+        aggregated=False,
         **kwargs
     ):
         if lookup_expr is None:
@@ -95,6 +96,7 @@ class Filter:
         self.method = method
         self.distinct = distinct
         self.exclude = exclude
+        self.aggregated = aggregated
 
         self.extra = kwargs
         self.extra.setdefault("required", False)
@@ -127,6 +129,7 @@ class Filter:
             # override filter w/ FilterMethod.
             if value is not None:
                 self.filter = FilterMethod(self)
+                self.get_q_object = FilterMethod(self)
 
         return locals()
 
@@ -157,6 +160,20 @@ class Filter:
 
             self._field = self.field_class(label=self.label, **field_kwargs)
         return self._field
+
+    def update_qs_params(self, qs_object, filter_qs, exclude_qs, distinct):
+        if self.exclude:
+            exclude_qs = exclude_qs & qs_object
+        else:
+            filter_qs = filter_qs & qs_object
+        distinct = True if self.distinct else distinct
+        return (filter_qs, exclude_qs, distinct)
+
+    def get_q_object(self, qs, value):
+        if value in EMPTY_VALUES:
+            return Q()
+        lookup = "%s__%s" % (self.field_name, self.lookup_expr)
+        return Q(**{lookup: value})
 
     def filter(self, qs, value):
         if value in EMPTY_VALUES:
@@ -829,7 +846,7 @@ class FilterMethod:
 
     def __call__(self, qs, value):
         if value in EMPTY_VALUES:
-            return qs
+            return Q() if self.f.aggregated else qs
 
         return self.method(qs, self.f.field_name, value)
 

@@ -56,6 +56,7 @@ class FilterSetOptions:
         self.model = getattr(options, "model", None)
         self.fields = getattr(options, "fields", None)
         self.exclude = getattr(options, "exclude", None)
+        self.aggregated_fields = getattr(options, 'aggregated_fields', None)
 
         self.filter_overrides = getattr(options, "filter_overrides", {})
 
@@ -229,16 +230,24 @@ class BaseFilterSet:
         This method should be overridden if additional filtering needs to be
         applied to the queryset before it is cached.
         """
+        filter_q = models.Q()
+        exclude_q = models.Q()
+        distinct = False
         for name, value in self.form.cleaned_data.items():
-            queryset = self.filters[name].filter(queryset, value)
-            assert isinstance(
-                queryset, models.QuerySet
-            ), "Expected '%s.%s' to return a QuerySet, but got a %s instead." % (
-                type(self).__name__,
-                name,
-                type(queryset).__name__,
-            )
-        return queryset
+            filter_field = self.filters[name]
+            if filter_field.aggregated:
+                q_object = filter_field.get_q_object(queryset, value)
+                assert isinstance(q_object, models.Q), \
+                    "Expected '%s.%s' to return a Q object, but got a %s instead." \
+                    % (type(self).__name__, name, type(q_object).__name__)
+                (filter_q, exclude_q, distinct) = filter_field.update_qs_params(q_object, filter_q, exclude_q, distinct)
+            else:
+                queryset = filter_field.filter(queryset, value)
+                assert isinstance(queryset, models.QuerySet), \
+                    "Expected '%s.%s' to return a QuerySet, but got a %s instead." \
+                    % (type(self).__name__, name, type(queryset).__name__)
+        final_queryset = queryset.exclude(exclude_q).filter(filter_q)
+        return final_queryset.distinct() if distinct else final_queryset
 
     @property
     def qs(self):
@@ -275,6 +284,42 @@ class BaseFilterSet:
         return self._form
 
     @classmethod
+    def check_meta_values(cls):
+        """
+        Check 'fields' and 'agregate_fields arguments that should be used for
+        generating filters on the filterset. This is 'Meta.fields' plus
+        'Meta.aggregated_fields' sans the fields in 'Meta.exclude'.
+        """
+        fields = cls._meta.fields
+        aggregated_fields = cls._meta.aggregated_fields
+        exclude = cls._meta.exclude
+
+        assert not (fields is None and aggregated_fields is None and exclude is None), (
+            "Setting 'Meta.model' without either 'Meta.fields' or 'Meta.aggregated_fields' "
+            "or 'Meta.exclude' has been deprecated since 0.15.0 and is now disallowed. "
+            "Add an explicit 'Meta.fields' or 'Meta.aggregated_fields' or 'Meta.exclude' "
+            "to the %s class." % cls.__name__
+        )
+
+        aggregated_fields = aggregated_fields or type(fields)()
+
+        if fields and aggregated_fields:
+            assert type(fields) == type(aggregated_fields), (
+                "'Meta.fields' and 'Meta.aggregated_fields' both must be the same type. "
+                "Set 'Meta.fields' and 'Meta.aggregated_fields' in the %s class." % cls.__name__
+            )
+        if fields and not isinstance(fields, dict):
+            assert not len([f for f in fields if f in aggregated_fields]), (
+                "'Meta.fields' and 'Meta.aggregated_fields' must be mutually exclusive lists. "
+                "Set 'Meta.fields' and 'Meta.aggregated_fields' in the %s class." % cls.__name__
+            )
+        elif fields and aggregated_fields:
+            assert not len([f for f in fields.keys() if f in aggregated_fields.keys()]), (
+                "'Meta.fields' and 'Meta.aggregated_fields' must be mutually exclusive dicts. "
+                "Set 'Meta.fields' and 'Meta.aggregated_fields' in the %s class." % cls.__name__
+            )
+
+    @classmethod
     def get_fields(cls):
         """
         Resolve the 'fields' argument that should be used for generating filters on the
@@ -282,16 +327,12 @@ class BaseFilterSet:
         """
         model = cls._meta.model
         fields = cls._meta.fields
+        aggregated_fields = cls._meta.aggregated_fields
         exclude = cls._meta.exclude
 
-        assert not (fields is None and exclude is None), (
-            "Setting 'Meta.model' without either 'Meta.fields' or 'Meta.exclude' "
-            "has been deprecated since 0.15.0 and is now disallowed. Add an explicit "
-            "'Meta.fields' or 'Meta.exclude' to the %s class." % cls.__name__
-        )
-
+        cls.check_meta_values()
         # Setting exclude with no fields implies all other fields.
-        if exclude is not None and fields is None:
+        if exclude is not None and fields is None and aggregated_fields is None:
             fields = ALL_FIELDS
 
         # Resolve ALL_FIELDS into all fields for the filterset's model.
@@ -300,11 +341,12 @@ class BaseFilterSet:
 
         # Remove excluded fields
         exclude = exclude or []
+        fields = fields or type(aggregated_fields)()
+        aggregated_fields = aggregated_fields or type(fields)()
         if not isinstance(fields, dict):
-            fields = [
-                (f, [settings.DEFAULT_LOOKUP_EXPR]) for f in fields if f not in exclude
-            ]
+            fields = [(f, [settings.DEFAULT_LOOKUP_EXPR]) for f in (fields + aggregated_fields) if f not in exclude]
         else:
+            fields.update(aggregated_fields)
             fields = [(f, lookups) for f, lookups in fields.items() if f not in exclude]
 
         return OrderedDict(fields)
@@ -339,6 +381,7 @@ class BaseFilterSet:
         # Determine the filters that should be included on the filterset.
         filters = OrderedDict()
         fields = cls.get_fields()
+        aggregated_fields = cls._meta.aggregated_fields or []
         undefined = []
 
         for field_name, lookups in fields.items():
@@ -348,6 +391,7 @@ class BaseFilterSet:
             if field is None:
                 undefined.append(field_name)
 
+            aggregated = True if field_name in aggregated_fields else False
             for lookup_expr in lookups:
                 filter_name = cls.get_filter_name(field_name, lookup_expr)
 
@@ -357,9 +401,7 @@ class BaseFilterSet:
                     continue
 
                 if field is not None:
-                    filter_instance = cls.filter_for_field(
-                        field, field_name, lookup_expr
-                    )
+                    filter_instance = cls.filter_for_field(field, field_name, lookup_expr, aggregated)
                     if filter_instance is not None:
                         filters[filter_name] = filter_instance
 
@@ -393,7 +435,7 @@ class BaseFilterSet:
             raise ValueError(f"Invalid unknown_field_behavior: {behavior}")
 
     @classmethod
-    def filter_for_field(cls, field, field_name, lookup_expr=None):
+    def filter_for_field(cls, field, field_name, lookup_expr=None, aggregated=False):
         if lookup_expr is None:
             lookup_expr = settings.DEFAULT_LOOKUP_EXPR
         field, lookup_type = resolve_field(field, lookup_expr)
@@ -401,6 +443,7 @@ class BaseFilterSet:
         default = {
             "field_name": field_name,
             "lookup_expr": lookup_expr,
+            'aggregated': aggregated,
         }
 
         filter_class, params = cls.filter_for_lookup(field, lookup_type)
